@@ -11,65 +11,73 @@ import '../interfaces/IWETH.sol';
 import  ./ISwapRouter.sol
 
 contract MyTokenMarket is IUniswapV2Callee {
-    IUniswapV1Factory immutable factoryV1;
-    address immutable factory;
-    IWETH immutable WETH;
-    address swapRouter;
+	  using SafeERC20 for IERC20;
 
-    constructor(address _factory, address _factoryV1, address router,address _swapRouter public {
-        factoryV1 = IUniswapV1Factory(_factoryV1);
-        factory = _factory;
-        WETH = IWETH(IUniswapV2Router01(router).WETH());
-        swapRouter = _swapRouter；
+    uint24 MEDIUMFREE = 3000;
+    address immutable routerV3;
+
+    constructor(address _routerV3) public {
+        routerV3 = _routerV3;
     }
 
-    // needs to accept ETH from any V1 exchange and WETH. ideally this could be enforced, as in the router,
-    // but it's not possible because it requires a call to the v1 factory, which takes too much gas
-    receive() external payable {}
-
-    // gets tokens/WETH via a V2 flash swap, swaps for the ETH/tokens on V1, repays V2, and keeps the rest!
-    function uniswapV2Call(address sender, uint amount0, uint amount1, bytes calldata data) external override {
+    function uniswapV2Call(
+        address sender,
+        uint256 amount0,
+        uint256 amount1,
+        bytes calldata data
+    ) external override {
         address[] memory path = new address[](2);
-        uint amountToken;
-        uint amountETH;
-        { // scope for token{0,1}, avoids stack too deep errors
-        address token0 = IUniswapV2Pair(msg.sender).token0();
-        address token1 = IUniswapV2Pair(msg.sender).token1();
-        assert(msg.sender == UniswapV2Library.pairFor(factory, token0, token1)); // ensure that msg.sender is actually a V2 pair
-        assert(amount0 == 0 || amount1 == 0); // this strategy is unidirectional
-        path[0] = amount0 == 0 ? token0 : token1;
-        path[1] = amount0 == 0 ? token1 : token0;
-        amountToken = token0 == address(WETH) ? amount1 : amount0;
-        amountETH = token0 == address(WETH) ? amount0 : amount1;
+        {
+            // scope for token{0,1}, avoids stack too deep errors
+            address token0 = IUniswapV2Pair(msg.sender).token0();
+            address token1 = IUniswapV2Pair(msg.sender).token1();
+            path[0] = token0;
+            path[1] = token1;
         }
+        IERC20 tokenA = IERC20(path[0]);
+        IERC20 tokenB = IERC20(path[1]);
+        uint256 amount0Min = LowGasSafeMath.add(amount0, MEDIUMFREE);
+        uint256 amount1Min = LowGasSafeMath.add(amount1, MEDIUMFREE);
 
-        assert(path[0] == address(WETH) || path[1] == address(WETH)); // this strategy only works with a V2 WETH pair
-        IERC20 token = IERC20(path[0] == address(WETH) ? path[1] : path[0]);
-        IUniswapV1Exchange exchangeV1 = IUniswapV1Exchange(factoryV1.getExchange(address(token))); // get V1 exchange
-
-        if (amountToken > 0) {
-            (uint minETH) = abi.decode(data, (uint)); // slippage parameter for V1, passed in by caller
-            token.approve(address(exchangeV1), amountToken);
-            uint amountReceived = exchangeV1.tokenToEthSwapInput(amountToken, minETH, uint(-1));
-            uint amountRequired = UniswapV2Library.getAmountsIn(factory, amountToken, path)[0];
-            assert(amountReceived > amountRequired); // fail if we didn't get enough ETH back to repay our flash loan
-            WETH.deposit{value: amountRequired}();
-            assert(WETH.transfer(msg.sender, amountRequired)); // return WETH to V2 pair
-            (bool success,) = sender.call{value: amountReceived - amountRequired}(new bytes(0)); // keep the rest! (ETH)
-            assert(success);
+        if (amount0 > 0) {
+            tokenA.safeApprove(routerV3, amount0);
+            uint256 amountOut0 = ISwapRouter(routerV3).exactInputSingle(
+                ISwapRouter.ExactInputSingleParams({
+                    tokenIn: path[0],
+                    tokenOut: path[1],
+                    fee: MEDIUMFREE,
+                    recipient: address(this),
+                    deadline: block.timestamp,
+                    amountIn: amount0,
+                    amountOutMinimum: amount1Min,
+                    sqrtPriceLimitX96: 0
+                })
+            );
+            
+            assert(tokenA.transfer(msg.sender, amount0));
+            assert(amountOut0 > amount0Min);
+            uint256 profit0 = amountOut0 - amount0Min;
+            assert(tokenA.transfer(sender, profit0));
         } else {
-            (uint minTokens) = abi.decode(data, (uint)); // slippage parameter for V1, passed in by caller
-            WETH.withdraw(amountETH);
-            uint amountReceived = exchangeV1.ethToTokenSwapInput{value: amountETH}(minTokens, uint(-1));
-            uint amountRequired = UniswapV2Library.getAmountsIn(factory, amountETH, path)[0];
-            assert(amountReceived > amountRequired); // fail if we didn't get enough tokens back to repay our flash loan
-            assert(token.transfer(msg.sender, amountRequired)); // return tokens to V2 pair
-            assert(token.transfer(sender, amountReceived - amountRequired)); // keep the rest! (tokens)
+            tokenB.safeApprove(routerV3, amount1);
+            uint256 amountOut1 = ISwapRouter(routerV3).exactInputSingle(
+                ISwapRouter.ExactInputSingleParams({
+                    tokenIn: path[1],
+                    tokenOut: path[0],
+                    fee: MEDIUMFREE,
+                    recipient: address(this),
+                    deadline: block.timestamp,
+                    amountIn: amount1,
+                    amountOutMinimum: amount0Min,
+                    sqrtPriceLimitX96: 0
+                })
+            );
+
+            assert(tokenB.transfer(msg.sender, amount1));
+            assert(amountOut1 > amount1Min);
+            uint256 profit1 = amountOut1 - amount1Min;
+            assert(tokenB.transfer(sender, profit1));
         }
-        
-          function SwapLiquidity( address tokenA,  address tokenB,    uint24 fee)  {
-	   ISwapRouter(swapRouter).getPool(tokenA, tokenB,  fee )
-        //TODO: handle left
     }
        
 }
